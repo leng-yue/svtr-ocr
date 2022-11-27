@@ -57,6 +57,8 @@ class Attention(nn.Module):
     ) -> None:
         super().__init__()
 
+        assert mixer in ["local", "global"], "mixer must be local or global"
+
         self.dim = dim
         self.num_heads = num_heads
         self.mixer = mixer
@@ -115,6 +117,51 @@ class Attention(nn.Module):
         return x
 
 
+class Block(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mixer: Literal["local", "global"] = "global",
+        hw: tuple[int, int] = None,
+        local_k: tuple[int, int] = (7, 11),
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        qk_scale: Optional[float] = None,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        drop_path: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.mixer = Attention(
+            dim=dim,
+            num_heads=num_heads,
+            mixer=mixer,
+            hw=hw,
+            local_k=local_k,
+            qkv_bias=qkv_bias,
+            qk_scale=qk_scale,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+        )
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.norm2 = nn.LayerNorm(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=nn.GELU,
+            drop=drop,
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.drop_path(self.mixer(self.norm1(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        return x
+
 class PatchEmbed(nn.Module):
     """
     Patch Embedding that uses 2 or 3 conv layers to embed the image
@@ -158,6 +205,36 @@ class PatchEmbed(nn.Module):
         x = rearrange(x, "b c h w -> b (h w) c")
         return x
 
+class SubSample(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: tuple[int, int] = (2, 1),
+        act_layer: Optional[nn.Module] = None,
+    ) -> None:
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+        )
+        self.norm = nn.LayerNorm(out_channels)
+        self.act = act_layer() if act_layer is not None else nn.Identity()
+        
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = rearrange(x, "b c h w -> b (h w) c")
+        x = self.norm(x)
+        x = self.act(x)
+
+        return x
+
+
+class SVTRNet(nn.Module):
+    pass
 
 if __name__ == "__main__":
     model = Attention(128, hw=(8, 8), local_k=(3, 3), mixer="local")
