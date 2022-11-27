@@ -3,14 +3,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from timm.models.layers import DropPath, ConvBnAct, Mlp
+from timm.models.layers import DropPath, ConvBnAct, Mlp, PatchEmbed
 
 default_cfgs = {
     "svtr_tiny": {
         "embed_dim": [64, 128, 256, 192],
         "depths": [3, 6, 3],
         "num_heads": [2, 4, 8],
-        "mixers": ["local"] * 6 + ["global"] * 6
+        "mixers": ["local"] * 6 + ["global"] * 6,
     },
 }
 
@@ -33,7 +33,7 @@ class ConvMixer(nn.Module):
         self.local_mixer = nn.Conv2d(
             dim, dim, kernel_size=local_k, padding=local_k[0] // 2, groups=num_heads
         )
-        
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h, w = self.hw
         x = rearrange(x, "b (h w) d -> b d h w", h=h, w=w)
@@ -52,8 +52,8 @@ class Attention(nn.Module):
         local_k: tuple[int, int] = (7, 11),
         qkv_bias: bool = False,
         qk_scale: Optional[float] = None,
-        attn_drop: float = 0.,
-        proj_drop: float = 0.,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -77,26 +77,34 @@ class Attention(nn.Module):
             for i in range(h):
                 for j in range(w):
                     mask[w * i + j, i : i + hk, j : j + wk] = 0
-            mask_paddle = mask[:, hk // 2 : h + hk // 2, wk // 2 : w + wk // 2].flatten(1)
+            mask_paddle = mask[:, hk // 2 : h + hk // 2, wk // 2 : w + wk // 2].flatten(
+                1
+            )
             mask_inf = torch.full((h * w, h * w), float("-inf"), dtype=torch.float32)
             mask = torch.where(mask_paddle == 1, mask_inf, mask_paddle)
             self.mask = mask[None, None]
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.hw is not None:
             N = self.hw[0] * self.hw[1]
             C = self.dim
         else:
             N, C = x.shape[-2:]
-        
+
         # TODO: add flash attention
-        qkv = rearrange(self.qkv(x), "b s (three h d) -> three b h s d", three=3, h=self.num_heads, d=C // self.num_heads)
+        qkv = rearrange(
+            self.qkv(x),
+            "b s (three h d) -> three b h s d",
+            three=3,
+            h=self.num_heads,
+            d=C // self.num_heads,
+        )
         q, k, v = qkv[0] * self.scale, qkv[1], qkv[2]
         attn: torch.Tensor = q @ k.transpose(-2, -1)
 
         if self.mixer == "local":
             attn = attn + self.mask
-        
+
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
@@ -107,11 +115,49 @@ class Attention(nn.Module):
         return x
 
 
-if __name__ == "__main__":
-    model = Attention(
-        128,
-        hw=(8, 8),
-        local_k=(3, 3),
-        mixer="local"
-    )
+class PatchEmbed(nn.Module):
+    """
+    Patch Embedding that uses 2 or 3 conv layers to embed the image
+    Reference: https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.6/ppocr/modeling/backbones/rec_svtrnet.py#L269
+    """
 
+    def __init__(
+        self, in_channels: int = 3, embed_dim: int = 768, num_layers: int = 2
+    ) -> None:
+        super().__init__()
+
+        assert num_layers in [2, 3], "num_layers must be 2 or 3"
+
+        self.in_channels = in_channels
+        self.embed_dim = embed_dim
+        self.num_layers = num_layers
+
+        proj_config = {
+            2: (in_channels, embed_dim // 2, embed_dim),
+            3: (in_channels, embed_dim // 4, embed_dim // 2, embed_dim),
+        }[num_layers]
+
+        self.proj = nn.Sequential(
+            *[
+                ConvBnAct(
+                    x,
+                    y,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1,
+                    act_layer=nn.GELU,
+                    bias=True,
+                )
+                for x, y in zip(proj_config, proj_config[1:])
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [b, c, h, w]
+        x = self.proj(x)
+        x = rearrange(x, "b c h w -> b (h w) c")
+        return x
+
+
+if __name__ == "__main__":
+    model = Attention(128, hw=(8, 8), local_k=(3, 3), mixer="local")
