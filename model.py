@@ -34,6 +34,27 @@ default_cfgs = {
         "num_heads": [2, 4, 8],
         "mixer": ["local"] * 6 + ["global"] * 6,
     },
+    "svtr_small": {
+        "embed_dim": [96, 192, 256],
+        "out_channels": 192,
+        "depth": [3, 6, 6],
+        "num_heads": [3, 6, 8],
+        "mixer": ["local"] * 8 + ["global"] * 7,
+    },
+    "svtr_base": {
+        "embed_dim": [128, 256, 384],
+        "out_channels": 256,
+        "depth": [3, 6, 9],
+        "num_heads": [4, 8, 12],
+        "mixer": ["local"] * 8 + ["global"] * 10,
+    },
+    "svtr_large": {
+        "embed_dim": [192, 256, 512],
+        "out_channels": 384,
+        "depth": [3, 9, 9],
+        "num_heads": [6, 8, 16],
+        "mixer": ["local"] * 10 + ["global"] * 11,
+    },
 }
 
 
