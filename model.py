@@ -433,11 +433,23 @@ class SVTRNet(nn.Module):
 
         x = self.blocks1(x)
         x = self.sub_sample1(
-            rearrange(x, "b (h w) c -> b c h w", c=self.embed_dim[0], h=self.hw[0], w=self.hw[1])
+            rearrange(
+                x,
+                "b (h w) c -> b c h w",
+                c=self.embed_dim[0],
+                h=self.hw[0],
+                w=self.hw[1],
+            )
         )
         x = self.blocks2(x)
         x = self.sub_sample2(
-            rearrange(x, "b (h w) c -> b c h w", c=self.embed_dim[1], h=self.hw[0] // 2, w=self.hw[1])
+            rearrange(
+                x,
+                "b (h w) c -> b c h w",
+                c=self.embed_dim[1],
+                h=self.hw[0] // 2,
+                w=self.hw[1],
+            )
         )
         x = self.blocks3(x)
 
@@ -457,19 +469,20 @@ class SVTRNet(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out')
+            nn.init.kaiming_normal_(m.weight, mode="fan_out")
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
         elif isinstance(m, nn.BatchNorm2d):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
         elif isinstance(m, nn.Linear):
-            nn.init.trunc_normal_(m.weight, std=.02)
+            nn.init.trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
         elif isinstance(m, nn.LayerNorm):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
+
 
 class CTCHead(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None:
