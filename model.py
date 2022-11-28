@@ -24,43 +24,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
-from timm.models.layers import DropPath, Mlp
+from timm.models.layers import Mlp, DropPath
 
 default_cfgs = {
     "svtr_tiny": {
-        "embed_dim": [64, 128, 256, 192],
+        "embed_dim": [64, 128, 256],
+        "out_channels": 192,
         "depth": [3, 6, 3],
         "num_heads": [2, 4, 8],
         "mixer": ["local"] * 6 + ["global"] * 6,
     },
 }
-
-
-class ConvMixer(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int = 8,
-        hw: tuple[int, int] = (8, 25),
-        local_k: tuple[int, int] = (3, 3),
-    ) -> None:
-        super().__init__()
-
-        self.dim = dim
-        self.num_heads = num_heads
-        self.hw = hw
-        self.local_k = local_k
-
-        self.local_mixer = nn.Conv2d(
-            dim, dim, kernel_size=local_k, padding=local_k[0] // 2, groups=num_heads
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h, w = self.hw
-        x = rearrange(x, "b (h w) d -> b d h w", h=h, w=w)
-        x = self.local_mixer(x)
-        x = rearrange(x, "b d h w -> b (h w) d")
-        return x
 
 
 class ConvBnAct(nn.Module):
@@ -184,10 +158,11 @@ class Block(nn.Module):
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
+        pre_norm: bool = True,
     ) -> None:
         super().__init__()
 
-        self.norm1 = nn.LayerNorm(dim)
+        self.norm1 = nn.LayerNorm(dim, eps=1e-6)
         self.mixer = Attention(
             dim=dim,
             num_heads=num_heads,
@@ -201,17 +176,21 @@ class Block(nn.Module):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
-        mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(
             in_features=dim,
-            hidden_features=mlp_hidden_dim,
+            hidden_features=int(dim * mlp_ratio),
             act_layer=nn.GELU,
             drop=drop,
         )
+        self.pre_norm = pre_norm
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.drop_path(self.mixer(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        if self.pre_norm:
+            x = self.norm1(x + self.drop_path(self.mixer(x)))
+            x = self.norm2(x + self.drop_path(self.mlp(x)))
+        else:
+            x = x + self.drop_path(self.mixer(self.norm1(x)))
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
 
@@ -319,6 +298,7 @@ class SVTRNet(nn.Module):
         out_channels: int = 192,
         out_char_num: int = 25,
         sub_num: int = 2,
+        pre_norm: bool = False,
     ) -> None:
         super().__init__()
 
@@ -326,6 +306,7 @@ class SVTRNet(nn.Module):
         self.in_channels = in_channels
         self.embed_dim = embed_dim
         self.out_channels = out_channels
+        self.pre_norm = pre_norm
 
         self.patch_embed = PatchEmbed(
             img_size=img_size,
@@ -356,6 +337,7 @@ class SVTRNet(nn.Module):
                     drop=drop_rate,
                     attn_drop=attn_drop_rate,
                     drop_path=dpr[i],
+                    pre_norm=pre_norm,
                 )
                 for i in range(depth[0])
             ]
@@ -380,6 +362,7 @@ class SVTRNet(nn.Module):
                     drop=drop_rate,
                     attn_drop=attn_drop_rate,
                     drop_path=dpr[depth[0] + i],
+                    pre_norm=pre_norm,
                 )
                 for i in range(depth[1])
             ]
@@ -404,12 +387,11 @@ class SVTRNet(nn.Module):
                     drop=drop_rate,
                     attn_drop=attn_drop_rate,
                     drop_path=dpr[depth[0] + depth[1] + i],
+                    pre_norm=pre_norm,
                 )
                 for i in range(depth[2])
             ]
         )
-
-        self.norm = nn.LayerNorm(embed_dim[2], eps=1e-6)
 
         # Classifier head
         self.avg_pool = nn.AdaptiveAvgPool2d((1, out_char_num))
@@ -419,6 +401,10 @@ class SVTRNet(nn.Module):
         self.hard_swish = nn.Hardswish()
         self.dropout = nn.Dropout(p=last_drop)
 
+        # Init weights
+        nn.init.trunc_normal_(self.pos_embed)
+        self.apply(self._init_weights)
+
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
         x = x + self.pos_embed
@@ -426,15 +412,13 @@ class SVTRNet(nn.Module):
 
         x = self.blocks1(x)
         x = self.sub_sample1(
-            rearrange(x, "b (h w) c -> b c h w", h=self.hw[0], w=self.hw[1])
+            rearrange(x, "b (h w) c -> b c h w", c=self.embed_dim[0], h=self.hw[0], w=self.hw[1])
         )
         x = self.blocks2(x)
         x = self.sub_sample2(
-            rearrange(x, "b (h w) c -> b c h w", h=self.hw[0] // 2, w=self.hw[1])
+            rearrange(x, "b (h w) c -> b c h w", c=self.embed_dim[1], h=self.hw[0] // 2, w=self.hw[1])
         )
         x = self.blocks3(x)
-
-        x = self.norm(x)
 
         return x
 
@@ -450,6 +434,21 @@ class SVTRNet(nn.Module):
 
         return x
 
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.BatchNorm2d):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
 
 class CTCHead(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None:
@@ -467,9 +466,7 @@ class CTCHead(nn.Module):
 def build_network(cfg_name: str, out_channels: int, **kwargs) -> nn.Module:
     cfg = default_cfgs[cfg_name]
 
-    from rec_svtr import SVTRNet as SVTRGNet
-
-    backbone = SVTRGNet(**cfg, **kwargs)
+    backbone = SVTRNet(**cfg, **kwargs)
     model = nn.Sequential(
         backbone,
         Rearrange("b c h w -> b (h w) c"),
