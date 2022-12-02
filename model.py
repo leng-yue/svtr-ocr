@@ -21,12 +21,18 @@ from typing import Literal, Optional
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from timm.models.layers import Mlp, DropPath
 
 default_cfgs = {
+    "svtr_nano": {
+        "embed_dim": [64, 128, 256],
+        "out_channels": 192,
+        "depth": [1, 2, 1],
+        "num_heads": [2, 4, 8],
+        "mixer": ["local"] * 2 + ["global"] * 2,
+    },
     "svtr_tiny": {
         "embed_dim": [64, 128, 256],
         "out_channels": 192,
@@ -180,6 +186,7 @@ class Block(nn.Module):
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
         pre_norm: bool = True,
+        act_layer: Optional[nn.Module] = nn.GELU,
     ) -> None:
         super().__init__()
 
@@ -200,7 +207,7 @@ class Block(nn.Module):
         self.mlp = Mlp(
             in_features=dim,
             hidden_features=int(dim * mlp_ratio),
-            act_layer=nn.GELU,
+            act_layer=act_layer,
             drop=drop,
         )
         self.pre_norm = pre_norm
@@ -317,7 +324,6 @@ class SVTRNet(nn.Module):
         attn_drop_rate: float = 0.0,
         drop_path_rate: float = 0.1,
         out_channels: int = 192,
-        out_char_num: int = 25,
         sub_num: int = 2,
         pre_norm: bool = False,
     ) -> None:
@@ -415,7 +421,7 @@ class SVTRNet(nn.Module):
         )
 
         # Classifier head
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, out_char_num))
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, None))
         self.last_conv = nn.Conv2d(
             embed_dim[2], out_channels, kernel_size=1, stride=1, padding=0, bias=False
         )
@@ -459,7 +465,6 @@ class SVTRNet(nn.Module):
         x = self.forward_features(x)
 
         x = rearrange(x, "b (h w) c -> b c h w", h=self.hw[0] // 4, w=self.hw[1])
-
         x = self.avg_pool(x)
         x = self.last_conv(x)
         x = self.hard_swish(x)
@@ -497,7 +502,7 @@ class CTCHead(nn.Module):
         return x
 
 
-def build_network(cfg_name: str, out_channels: int, **kwargs) -> nn.Module:
+def _create_svtr(cfg_name: str, out_channels: int, **kwargs) -> nn.Module:
     cfg = default_cfgs[cfg_name]
 
     backbone = SVTRNet(**cfg, **kwargs)
@@ -510,8 +515,28 @@ def build_network(cfg_name: str, out_channels: int, **kwargs) -> nn.Module:
     return model
 
 
+def svtr_nano(out_channels: int, **kwargs) -> nn.Module:
+    return _create_svtr("svtr_nano", out_channels, **kwargs)
+
+
+def svtr_tiny(out_channels: int, **kwargs) -> nn.Module:
+    return _create_svtr("svtr_tiny", out_channels, **kwargs)
+
+
+def small(out_channels: int, **kwargs) -> nn.Module:
+    return _create_svtr("svtr_small", out_channels, **kwargs)
+
+
+def svtr_base(out_channels: int, **kwargs) -> nn.Module:
+    return _create_svtr("svtr_base", out_channels, **kwargs)
+
+
+def svtr_large(out_channels: int, **kwargs) -> nn.Module:
+    return _create_svtr("svtr_large", out_channels, **kwargs)
+
+
 if __name__ == "__main__":
-    model = build_network("svtr_tiny", 100)
+    model = build_svtr_tiny(100)
 
     test_input = torch.randn(1, 3, 32, 100)
     test_target = torch.randint(0, 25, (1, 10))
