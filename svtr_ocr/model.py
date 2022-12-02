@@ -536,7 +536,7 @@ def svtr_large(out_channels: int, **kwargs) -> nn.Module:
 
 
 if __name__ == "__main__":
-    model = build_svtr_tiny(100)
+    model = svtr_tiny(100)
 
     test_input = torch.randn(1, 3, 32, 100)
     test_target = torch.randint(0, 25, (1, 10))
